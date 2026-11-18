@@ -1,0 +1,25 @@
+[package]
+name = "pondercade"
+version = "0.1.0"
+edition = "2024"
+description = "Pondercade - a tiny arcade of polished mini games for while your AI is pondering"
+license = "MIT"
+repository = "https://github.com/JBrownSchue/pondercade"
+
+[dependencies]
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "persistence"] }
+serde = { version = "1.0.229", features = ["derive"] }
+
+# Linux needs a windowing backend; the default features are off above to keep Windows/macOS small.
+# winit's defaults load X11/Wayland libraries at runtime and draw Wayland window decorations.
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "persistence", "x11", "wayland"] }
+winit = "0.30"
+
+# Optimise release builds for a small binary.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,128 @@
+name: Release
+
+# Push a tag like `v0.1.0` to build Windows, macOS and Linux binaries and publish a GitHub Release.
+# "Run workflow" (manual) only builds and uploads the binaries as workflow artifacts.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+            targets: x86_64-pc-windows-msvc
+          - name: linux-x64
+            # Oldest supported Ubuntu image -> older glibc -> runs on more distros.
+            os: ubuntu-22.04
+            targets: x86_64-unknown-linux-gnu
+          - name: macos-universal
+            os: macos-latest
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libgl1-mesa-dev pkg-config
+
+      - name: Test
+        if: runner.os == 'Linux'
+        run: cargo test
+
+      - name: Build & package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --release --target x86_64-pc-windows-msvc
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/pondercade.exe, README.md, LICENSE dist/
+          Compress-Archive -Path dist/* -DestinationPath pondercade-windows-x64.zip
+
+      - name: Build & package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --release --target x86_64-unknown-linux-gnu
+          mkdir dist
+          cp target/x86_64-unknown-linux-gnu/release/pondercade README.md LICENSE dist/
+          tar -czf pondercade-linux-x64.tar.gz -C dist .
+
+      - name: Build & package (macOS universal .app)
+        if: runner.os == 'macOS'
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          APP=Pondercade.app
+          mkdir -p "$APP/Contents/MacOS"
+          lipo -create -output "$APP/Contents/MacOS/pondercade" \
+            target/aarch64-apple-darwin/release/pondercade \
+            target/x86_64-apple-darwin/release/pondercade
+          cat > "$APP/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>Pondercade</string>
+            <key>CFBundleDisplayName</key><string>Pondercade</string>
+            <key>CFBundleIdentifier</key><string>io.github.jbrownschue.pondercade</string>
+            <key>CFBundleExecutable</key><string>pondercade</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleVersion</key><string>${VERSION}</string>
+            <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+            <key>LSApplicationCategoryType</key><string>public.app-category.games</string>
+          </dict>
+          </plist>
+          EOF
+          # Ad-hoc signature (required for Apple Silicon; not notarized).
+          codesign --force --deep --sign - "$APP"
+          ditto -c -k --keepParent "$APP" pondercade-macos-universal.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pondercade-${{ matrix.name }}
+          path: pondercade-*.*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la dist
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "Pondercade $GITHUB_REF_NAME" \
+            --generate-notes
