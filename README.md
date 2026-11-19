@@ -26,7 +26,7 @@ You need a sword fight. Pondercade is that sword fight.
 
 ## The solution
 
-Pondercade is a tiny desktop arcade with five games built for the exact length of an agent's
+Pondercade is a tiny desktop arcade with seven games built for the exact length of an agent's
 "just a sec". Each one is easy to pick up and easy to drop again when the agent comes back with
 *"I've made the following changes:"*
 
@@ -37,6 +37,8 @@ Pondercade is a tiny desktop arcade with five games built for the exact length o
 | 💣 | **Minesweeper** | resolving merge conflicts (thematically appropriate) |
 | 🃏 | **Memory** | re-reading files it already read 30 seconds ago |
 | ❌ | **Tic-Tac-Toe** | asking for permission to run `ls` (you'll lose to *Impossible* mode faster) |
+| 🧱 | **Ponderfall** | stacking up tool calls faster than it can clear them |
+| ♟️ | **Chess** | thinking several moves ahead (so can you; *Hard* mode thinks for 1.5 seconds) |
 
 ### Features nobody asked for but everyone needed
 
@@ -46,11 +48,14 @@ Pondercade is a tiny desktop arcade with five games built for the exact length o
 - **Tiny.** About 5 MB, one file, starts instantly. Smaller than the log your agent just printed.
 - **Offline.** Works even when the AI is down. *Especially* when the AI is down.
 - **Instantly hideable.** It's just a window. Alt-Tab is your panic button.
+- **Knows when your agent is done.** Optional Claude Code hooks pop up a toast when Claude finishes
+  or needs you. See [Claude Code integration](#claude-code-integration).
 
 | | | |
 |---|---|---|
 | ![2048](docs/2048.png) | ![Snake](docs/snake.png) | ![Minesweeper](docs/minesweeper.png) |
-| ![Memory](docs/memory.png) | ![Tic-Tac-Toe](docs/tictactoe.png) | ![Statistics](docs/stats.png) |
+| ![Memory](docs/memory.png) | ![Tic-Tac-Toe](docs/tictactoe.png) | ![Ponderfall](docs/ponderfall.png) |
+| ![Chess](docs/chess.png) | ![Statistics](docs/stats.png) | |
 
 ### Officially not affiliated
 
@@ -78,6 +83,39 @@ Grab the latest build for your OS from the **[Releases page](https://github.com/
 | Minesweeper | Left click reveals, right click flags, clicking a number reveals its neighbours; Easy / Medium / Hard |
 | Memory | Click two cards; 4×4, 6×4 or 6×6 boards |
 | Tic-Tac-Toe | Click a cell; Easy / Normal / Impossible AI, or 2 players |
+| Ponderfall | ←/→ (A/D) move, ↑ / W / X rotate, Z / Q rotate back, ↓ (S) soft drop, Space hard drop, C hold, P / Esc pause |
+| Chess | Click a piece, then a highlighted square; Easy / Normal / Hard AI (play as White or Black), or 2 players; Undo takes back your last move |
+
+## Claude Code integration
+
+Let Pondercade tell you when your agent is finished, so you can stop staring at the spinner *and* stop
+checking on it every 20 seconds.
+
+1. Open Pondercade and click **Install hooks** on the Home page.
+2. Start a new Claude Code session. That's it.
+
+From then on:
+
+- **Claude starts working** (you send a prompt) → Pondercade opens if it isn't already running.
+  Turn this off with the **Auto-open** button if you'd rather open it yourself.
+- **Claude is done** → a green *"Claude is done"* toast, and the taskbar/dock icon flashes if
+  Pondercade is in the background. Finish your round, then head back.
+- **Claude needs you** (a permission prompt, a question, or it's been waiting a while) → an amber
+  *"Claude needs your input"* toast with Claude's message. It stays until you click it.
+
+Toasts show which project they're about, so several Claude sessions at once work fine.
+
+**How it works:** the button adds three hooks (`UserPromptSubmit`, `Stop`, `Notification`) to
+`~/.claude/settings.json`. Your other settings and hooks are kept, and a backup is saved next to the
+file as `settings.json.pondercade-backup` the first time. Each hook runs `pondercade hook`, which
+reads the event Claude Code sends, appends one line to `claude/events.jsonl` in the stats folder
+below and exits right away. The hooks run asynchronously and print nothing, so they never slow
+Claude down or change what it sees. **Remove hooks** takes them out again.
+
+The hooks point at wherever Pondercade is when you click Install. If you move the app, click
+**Reinstall hooks** (the Home page tells you when it's needed). On macOS, move `Pondercade.app` to
+*Applications* first. From a terminal you can also run `pondercade install-hooks` /
+`pondercade uninstall-hooks` (exit code 0 means success).
 
 ## Where are my stats?
 

@@ -83,6 +83,8 @@ pub enum Icon {
     Mine,
     Cards,
     Ttt,
+    Blocks,
+    Chess,
     Play,
 }
 
@@ -140,6 +142,21 @@ pub fn paint_icon(p: &Painter, c: Pos2, s: f32, icon: Icon, color: Color32) {
             p.line_segment([a - vec2(d, d), a + vec2(d, d)], st(0.12));
             p.line_segment([a + vec2(-d, d), a + vec2(d, -d)], st(0.12));
             p.circle_stroke(c + vec2(s * 0.24, 0.0), s * 0.17, st(0.11));
+        }
+        Icon::Blocks => {
+            // Four cells in a zig-zag, like a falling piece.
+            let u = s * 0.3;
+            for (i, (x, y)) in [(-1.0, -0.5), (0.0, -0.5), (0.0, 0.5), (1.0, 0.5)].into_iter().enumerate() {
+                let r = Rect::from_center_size(c + vec2(x * u, y * u), Vec2::splat(u * 0.86));
+                p.rect_filled(r, s * 0.05, alpha(color, if i % 3 == 0 { 0.6 } else { 1.0 }));
+            }
+        }
+        Icon::Chess => {
+            // A pawn silhouette.
+            p.circle_filled(c + vec2(0.0, -s * 0.22), s * 0.15, color);
+            let body = vec![c + vec2(-s * 0.08, -s * 0.06), c + vec2(s * 0.08, -s * 0.06), c + vec2(s * 0.2, s * 0.26), c + vec2(-s * 0.2, s * 0.26)];
+            p.add(Shape::convex_polygon(body, color, Stroke::NONE));
+            p.rect_filled(Rect::from_min_max(c + vec2(-s * 0.3, s * 0.24), c + vec2(s * 0.3, s * 0.42)), s * 0.05, color);
         }
         Icon::Play => {
             let pts = vec![c + vec2(-s * 0.3, -s * 0.38), c + vec2(s * 0.4, 0.0), c + vec2(-s * 0.3, s * 0.38)];

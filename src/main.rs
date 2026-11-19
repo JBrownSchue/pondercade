@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod claude;
 mod games;
 #[cfg(debug_assertions)]
 mod shots;
@@ -7,6 +8,8 @@ mod stats;
 mod theme;
 mod util;
 mod widgets;
+#[cfg(windows)]
+mod winfix;
 
 use eframe::egui::{self, Align2, CentralPanel, CursorIcon, FontId, Frame, Panel, RichText, ScrollArea, Sense};
 use games::Game;
@@ -16,7 +19,7 @@ use theme::*;
 use widgets::{Icon, Pill, chip, paint_icon, sparkline};
 
 const STATS_KEY: &str = "arcade_stats_v1";
-const APP_NAME: &str = "Pondercade";
+pub const APP_NAME: &str = "Pondercade";
 /// Name used before the rename; its saved stats are carried over on first start.
 const OLD_APP_NAME: &str = "Pixel Arcade";
 
@@ -33,13 +36,50 @@ struct App {
     stats: BTreeMap<String, GameStats>,
     confirm_reset: bool,
     last_time: Option<f64>,
+    claude: ClaudeLink,
+    /// Last seen window size in points, and whether it was maximized/fullscreen/minimized.
+    #[cfg(windows)]
+    win_size: Option<(egui::Vec2, bool)>,
     #[cfg(debug_assertions)]
     shooter: Option<shots::Shooter>,
+}
+
+/// State of the Claude Code integration as seen by the app.
+struct ClaudeLink {
+    watcher: claude::Watcher,
+    /// Toasts on screen: (event, time shown).
+    toasts: Vec<(claude::Event, f64)>,
+    /// Latest known state per Claude session.
+    sessions: BTreeMap<String, claude::Kind>,
+    /// (hooks present, hooks point at this exe) - refreshed after install/uninstall.
+    installed: (bool, bool),
+    autolaunch: bool,
+    /// Result of the last install/uninstall click.
+    note: Option<(String, bool)>,
+}
+
+impl ClaudeLink {
+    fn new() -> Self {
+        Self {
+            watcher: claude::Watcher::new(),
+            toasts: Vec::new(),
+            sessions: BTreeMap::new(),
+            installed: claude::installed(),
+            autolaunch: claude::autolaunch_enabled(),
+            note: None,
+        }
+    }
+
+    fn working(&self) -> usize {
+        self.sessions.values().filter(|k| **k == claude::Kind::Working).count()
+    }
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::apply(&cc.egui_ctx);
+        #[cfg(windows)]
+        winfix::install(cc);
         let stats = cc.storage.and_then(|s| eframe::get_value(s, STATS_KEY)).unwrap_or_default();
         Self {
             screen: Screen::Home,
@@ -47,6 +87,9 @@ impl App {
             stats,
             confirm_reset: false,
             last_time: None,
+            claude: ClaudeLink::new(),
+            #[cfg(windows)]
+            win_size: None,
             #[cfg(debug_assertions)]
             shooter: shots::Shooter::from_env(),
         }
@@ -127,7 +170,9 @@ impl App {
                 .map_or("-", |g| g.name());
             chip(ui, "Favourite", fav, AMBER);
         });
-        ui.add_space(14.0);
+        ui.add_space(6.0);
+        self.claude_card(ui);
+        ui.add_space(10.0);
 
         let gap = 16.0;
         let avail = ui.available_width();
@@ -151,6 +196,174 @@ impl App {
         });
         if let Some(i) = open {
             self.screen = Screen::Game(i);
+        }
+    }
+
+    /// Fallback for the drag-between-monitors growth bug (the real fix is in `winfix.rs`):
+    /// a winit bug on Windows: dragging the window by its title bar between
+    /// monitors with different scaling makes it grow by the DPI ratio on every crossing (e.g.
+    /// 1.25× per crossing between 125% and 100% screens), without bound. Windows' drag loop
+    /// keeps the old pixel size after winit has already switched scale factor, so the next
+    /// crossing scales an already-large window up again.
+    ///
+    /// A correct DPI change keeps the window's size in *points* the same, so a sudden uniform
+    /// scaling of the size in points (same factor for width and height) can only be this bug -
+    /// a hand resize never scales both axes by exactly the same amount in one frame. We undo it.
+    #[cfg(windows)]
+    fn guard_window_size(&mut self, ctx: &egui::Context) {
+        let (size, special) = ctx.input(|i| {
+            let v = i.viewport();
+            let special = v.maximized == Some(true) || v.fullscreen == Some(true) || v.minimized == Some(true);
+            (v.inner_rect.map(|r| r.size()), special)
+        });
+        let Some(size) = size.filter(|s| s.x > 1.0 && s.y > 1.0) else { return };
+        if let Some((prev, prev_special)) = self.win_size {
+            let (fx, fy) = (size.x / prev.x, size.y / prev.y);
+            let uniform = (fx - fy).abs() < 0.02 * fx;
+            if !special && !prev_special && uniform && !(0.92..=1.08).contains(&fx) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(prev));
+                return; // keep `prev` as the size we expect to see
+            }
+        }
+        self.win_size = Some((size, special));
+    }
+
+    /// Home-page panel to connect Pondercade to Claude Code.
+    fn claude_card(&mut self, ui: &mut egui::Ui) {
+        let c = &mut self.claude;
+        Frame::default().fill(PANEL).corner_radius(14.0).inner_margin(egui::Margin::symmetric(16, 12)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let (any, current) = c.installed;
+                let (title, sub) = match (any, current) {
+                    (false, _) => (
+                        "Get a heads-up from Claude Code",
+                        "Install hooks: Pondercade opens when Claude starts working and tells you when it's done or needs you.",
+                    ),
+                    (true, false) => ("Claude Code hooks point elsewhere", "They were installed from another copy of Pondercade. Reinstall to use this one."),
+                    (true, true) => match c.working() {
+                        0 => ("Connected to Claude Code", "You'll get a toast here when Claude is done or needs your input."),
+                        1 => ("Claude is pondering…", "Play away. You'll get a toast here when it's done or needs you."),
+                        _ => ("Several Claudes are pondering…", "Play away. You'll get a toast for each one."),
+                    },
+                };
+                // Buttons are laid out first (right-to-left) so the text can wrap in the space left.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let result = if !current {
+                        ui.add(Pill::primary(if any { "Reinstall hooks" } else { "Install hooks" }, ACCENT))
+                            .on_hover_text("Adds Pondercade to the hooks in ~/.claude/settings.json. Your other settings are kept and a backup is made.")
+                            .clicked()
+                            .then(|| claude::install().map(|_| "Installed. Takes effect in Claude Code sessions started from now on."))
+                    } else {
+                        ui.add(Pill::new("Remove hooks")).clicked().then(|| claude::uninstall().map(|_| "Hooks removed."))
+                    };
+                    if let Some(r) = result {
+                        c.note = Some(match r {
+                            Ok(m) => (m.to_owned(), true),
+                            Err(e) => (e, false),
+                        });
+                        c.installed = claude::installed();
+                    }
+                    if current {
+                        let label = if c.autolaunch { "Auto-open: on" } else { "Auto-open: off" };
+                        if ui.add(Pill::new(label).selected(c.autolaunch)).on_hover_text("Open Pondercade automatically when Claude starts working").clicked() {
+                            c.autolaunch = !c.autolaunch;
+                            claude::set_autolaunch(c.autolaunch);
+                        }
+                    }
+                    ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.label(RichText::new(title).size(15.0).strong().color(TEXT));
+                        ui.label(RichText::new(sub).size(12.5).color(MUTED));
+                        if let Some((msg, ok)) = &c.note {
+                            ui.label(RichText::new(msg).size(12.0).color(if *ok { GREEN } else { RED }));
+                        }
+                    });
+                });
+            });
+        });
+    }
+
+    /// Polls for Claude Code events and draws toasts in the top-right corner.
+    fn claude_toasts(&mut self, ctx: &egui::Context) {
+        use claude::Kind;
+        let now = ctx.input(|i| i.time);
+        let c = &mut self.claude;
+        for e in c.watcher.poll(now) {
+            c.sessions.insert(e.session.clone(), e.kind);
+            // Newer news about a session replaces its older toast.
+            c.toasts.retain(|(t, _)| t.session != e.session || e.session.is_empty());
+            if e.kind != Kind::Working && !ctx.input(|i| i.focused) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+            }
+            c.toasts.push((e, now));
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        // "Working" is a brief hint, "done" lingers, "needs input" stays until clicked away.
+        c.toasts.retain(|(e, t)| match e.kind {
+            Kind::Working => now - t < 4.0,
+            Kind::Done => now - t < 30.0,
+            Kind::Input => true,
+        });
+        while c.toasts.len() > 4 {
+            c.toasts.remove(0);
+        }
+
+        let mut dismiss = None;
+        let mut y = 16.0;
+        for (i, (e, t)) in c.toasts.iter().enumerate().rev() {
+            let k = ((now - t) / 0.25).clamp(0.0, 1.0) as f32;
+            if k < 1.0 {
+                ctx.request_repaint();
+            }
+            let (title, color) = match e.kind {
+                Kind::Working => ("Claude is pondering…", ACCENT),
+                Kind::Done => ("Claude is done", GREEN),
+                Kind::Input => ("Claude needs your input", AMBER),
+            };
+            let detail = match e.kind {
+                Kind::Working => "Play away, you'll get a heads-up.".to_owned(),
+                Kind::Done => "Finish your round, then head back.".to_owned(),
+                Kind::Input if !e.message.is_empty() => e.message.clone(),
+                Kind::Input => "It's waiting for you.".to_owned(),
+            };
+            let resp = egui::Area::new(egui::Id::unique(("claude_toast", i)))
+                .order(egui::Order::Foreground)
+                .movable(false)
+                .sense(Sense::click())
+                .anchor(Align2::RIGHT_TOP, egui::vec2(-16.0 + (1.0 - k) * 40.0, y))
+                .show(ctx, |ui| {
+                    ui.set_opacity(k);
+                    Frame::default()
+                        .fill(CARD)
+                        .stroke(egui::Stroke::new(1.0, alpha(color, 0.6)))
+                        .corner_radius(14.0)
+                        .inner_margin(egui::Margin::symmetric(14, 10))
+                        .shadow(egui::Shadow { offset: [0, 6], blur: 18, spread: 0, color: alpha(egui::Color32::BLACK, 0.45) })
+                        .show(ui, |ui| {
+                            ui.set_max_width(320.0);
+                            ui.horizontal(|ui| {
+                                let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 18.0), Sense::hover());
+                                ui.painter().circle_filled(r.center(), 5.0, color);
+                                ui.vertical(|ui| {
+                                    ui.spacing_mut().item_spacing.y = 2.0;
+                                    ui.label(RichText::new(title).size(15.0).strong().color(TEXT));
+                                    if !e.project.is_empty() {
+                                        ui.label(RichText::new(format!("in {}", e.project)).size(12.0).color(color));
+                                    }
+                                    ui.label(RichText::new(&detail).size(12.5).color(MUTED));
+                                });
+                            });
+                        });
+                })
+                .response;
+            if resp.clone().on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Click to dismiss").clicked() {
+                dismiss = Some(i);
+            }
+            y += resp.rect.height() + 10.0;
+        }
+        if let Some(i) = dismiss {
+            c.toasts.remove(i);
         }
     }
 
@@ -305,7 +518,8 @@ impl eframe::App for App {
                         let st = self.stats.entry(g.id().to_owned()).or_default();
                         for j in 0..(6 + k * 3) as u64 {
                             let o = if (j + k as u64) % 3 == 0 { stats::Outcome::Loss } else { stats::Outcome::Win };
-                            st.record(o, if k == 4 { 0 } else { 200 + (j * 337 + k as u64 * 91) % 1800 });
+                            let no_score = matches!(g.id(), "tictactoe" | "chess");
+                            st.record(o, if no_score { 0 } else { 200 + (j * 337 + k as u64 * 91) % 1800 });
                         }
                         st.seconds = 300.0 + k as f64 * 420.0;
                     }
@@ -317,6 +531,8 @@ impl eframe::App for App {
                 }
             }
         }
+        #[cfg(windows)]
+        self.guard_window_size(ui.ctx());
         // Play-time tracking (idle gaps are capped so AFK time isn't counted).
         let now = ui.input(|i| i.time);
         let dt = self.last_time.map_or(0.0, |t| (now - t).clamp(0.0, 3.0));
@@ -344,6 +560,12 @@ impl eframe::App for App {
                 g.ui(ui, st);
             }
         });
+        let ctx = ui.ctx().clone();
+        self.claude_toasts(&ctx);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        claude::app_closed();
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -409,6 +631,16 @@ fn initial_size() -> [f32; 2] {
 }
 
 fn main() -> eframe::Result {
+    // `pondercade hook` is run by Claude Code's hooks: record the event and exit without a window.
+    match std::env::args().nth(1).as_deref() {
+        Some("hook") => {
+            claude::run_hook();
+            return Ok(());
+        }
+        Some("install-hooks") => std::process::exit(i32::from(claude::install().is_err())),
+        Some("uninstall-hooks") => std::process::exit(i32::from(claude::uninstall().is_err())),
+        _ => {}
+    }
     #[allow(unused_mut)]
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
