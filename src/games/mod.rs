@@ -2,9 +2,11 @@ use crate::stats::GameStats;
 use crate::widgets::Icon;
 use eframe::egui::{Color32, Ui};
 
+pub mod chess;
 pub mod g2048;
 pub mod memory;
 pub mod mines;
+pub mod ponderfall;
 pub mod snake;
 pub mod tictactoe;
 
@@ -29,5 +31,7 @@ pub fn all() -> Vec<Box<dyn Game>> {
         Box::new(mines::Mines::new()),
         Box::new(memory::Memory::new()),
         Box::new(tictactoe::TicTacToe::new()),
+        Box::new(ponderfall::Ponderfall::new()),
+        Box::new(chess::Chess::new()),
     ]
 }

@@ -9,6 +9,13 @@ repository = "https://github.com/JBrownSchue/pondercade"
 [dependencies]
 eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "persistence"] }
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+
+# Windows: subclass the window to stop it growing when dragged between monitors with different
+# scaling (see src/winfix.rs). Both crates are already dependencies of eframe, so this adds nothing.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+raw-window-handle = "0.6"
 
 # Linux needs a windowing backend; the default features are off above to keep Windows/macOS small.
 # winit's defaults load X11/Wayland libraries at runtime and draw Wayland window decorations.
