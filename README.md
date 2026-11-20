@@ -48,8 +48,8 @@ Pondercade is a tiny desktop arcade with seven games built for the exact length 
 - **Tiny.** About 5 MB, one file, starts instantly. Smaller than the log your agent just printed.
 - **Offline.** Works even when the AI is down. *Especially* when the AI is down.
 - **Instantly hideable.** It's just a window. Alt-Tab is your panic button.
-- **Knows when your agent is done.** Optional Claude Code hooks pop up a toast when Claude finishes
-  or needs you. See [Claude Code integration](#claude-code-integration).
+- **Knows when your agent is done.** Optional Claude Code and Codex hooks pop up a toast when your
+  agent finishes or needs you. See [Claude Code and Codex integration](#claude-code-and-codex-integration).
 
 | | | |
 |---|---|---|
@@ -86,36 +86,49 @@ Grab the latest build for your OS from the **[Releases page](https://github.com/
 | Ponderfall | ←/→ (A/D) move, ↑ / W / X rotate, Z / Q rotate back, ↓ (S) soft drop, Space hard drop, C hold, P / Esc pause |
 | Chess | Click a piece, then a highlighted square; Easy / Normal / Hard AI (play as White or Black), or 2 players; Undo takes back your last move |
 
-## Claude Code integration
+## Claude Code and Codex integration
 
 Let Pondercade tell you when your agent is finished, so you can stop staring at the spinner *and* stop
-checking on it every 20 seconds.
+checking on it every 20 seconds. The Home page has a row for each agent; connect one or both.
 
-1. Open Pondercade and click **Install hooks** on the Home page.
+**Claude Code**
+
+1. Open Pondercade and click **Install hooks** in the Claude Code row on the Home page.
 2. Start a new Claude Code session. That's it.
+
+**Codex**
+
+1. Open Pondercade and click **Install hooks** in the Codex row on the Home page.
+2. Start Codex, run `/hooks` and trust the three Pondercade hooks. (Codex skips new or changed
+   hooks until you've reviewed them, and warns at startup when some are waiting.)
 
 From then on:
 
-- **Claude starts working** (you send a prompt) → Pondercade opens if it isn't already running.
+- **The agent starts working** (you send a prompt) → Pondercade opens if it isn't already running.
   Turn this off with the **Auto-open** button if you'd rather open it yourself.
-- **Claude is done** → a green *"Claude is done"* toast, and the taskbar/dock icon flashes if
-  Pondercade is in the background. Finish your round, then head back.
-- **Claude needs you** (a permission prompt, a question, or it's been waiting a while) → an amber
-  *"Claude needs your input"* toast with Claude's message. It stays until you click it.
+- **The agent is done** → a green *"Claude is done"* / *"Codex is done"* toast, and the taskbar/dock
+  icon flashes if Pondercade is in the background. Finish your round, then head back.
+- **The agent needs you** → an amber *"… needs your input"* toast that stays until you click it.
+  For Claude: a permission prompt, a question, or it's been waiting a while (with Claude's message).
+  For Codex: an approval request (with what it wants to do).
 
-Toasts show which project they're about, so several Claude sessions at once work fine.
+Toasts show which project they're about, so several sessions at once (of either agent) work fine.
 
-**How it works:** the button adds three hooks (`UserPromptSubmit`, `Stop`, `Notification`) to
-`~/.claude/settings.json`. Your other settings and hooks are kept, and a backup is saved next to the
-file as `settings.json.pondercade-backup` the first time. Each hook runs `pondercade hook`, which
-reads the event Claude Code sends, appends one line to `claude/events.jsonl` in the stats folder
-below and exits right away. The hooks run asynchronously and print nothing, so they never slow
-Claude down or change what it sees. **Remove hooks** takes them out again.
+**How it works:** for Claude Code the button adds three hooks (`UserPromptSubmit`, `Stop`,
+`Notification`) to `~/.claude/settings.json`; for Codex it adds `UserPromptSubmit`, `Stop` and
+`PermissionRequest` to `~/.codex/hooks.json` (or `$CODEX_HOME/hooks.json`). Your other settings and
+hooks are kept, and a backup is saved next to the file as `*.json.pondercade-backup` the first time.
+Each hook runs `pondercade hook` (Codex: `pondercade hook codex`), which reads the event the agent
+sends, appends one line to `claude/events.jsonl` in the stats folder below and exits right away.
+The hooks run asynchronously and print nothing, so they never slow the agent down or change what it
+sees. **Remove hooks** takes them out again.
 
 The hooks point at wherever Pondercade is when you click Install. If you move the app, click
-**Reinstall hooks** (the Home page tells you when it's needed). On macOS, move `Pondercade.app` to
-*Applications* first. From a terminal you can also run `pondercade install-hooks` /
-`pondercade uninstall-hooks` (exit code 0 means success).
+**Reinstall hooks** (the Home page tells you when it's needed; Codex will ask you to trust the
+changed hooks again). On macOS, move `Pondercade.app` to *Applications* first. From a terminal you
+can also run `pondercade install-hooks` / `pondercade uninstall-hooks` for Claude Code, or
+`pondercade install-hooks codex` / `pondercade uninstall-hooks codex` for Codex (exit code 0 means
+success).
 
 ## Where are my stats?
 

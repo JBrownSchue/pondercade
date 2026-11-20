@@ -1,6 +1,6 @@
 #![windows_subsystem = "windows"]
 
-mod claude;
+mod agents;
 mod games;
 #[cfg(debug_assertions)]
 mod shots;
@@ -11,6 +11,7 @@ mod widgets;
 #[cfg(windows)]
 mod winfix;
 
+use agents::Agent;
 use eframe::egui::{self, Align2, CentralPanel, CursorIcon, FontId, Frame, Panel, RichText, ScrollArea, Sense};
 use games::Game;
 use stats::{GameStats, fmt_time};
@@ -36,7 +37,7 @@ struct App {
     stats: BTreeMap<String, GameStats>,
     confirm_reset: bool,
     last_time: Option<f64>,
-    claude: ClaudeLink,
+    agents: AgentLink,
     /// Last seen window size in points, and whether it was maximized/fullscreen/minimized.
     #[cfg(windows)]
     win_size: Option<(egui::Vec2, bool)>,
@@ -44,34 +45,34 @@ struct App {
     shooter: Option<shots::Shooter>,
 }
 
-/// State of the Claude Code integration as seen by the app.
-struct ClaudeLink {
-    watcher: claude::Watcher,
+/// State of the coding-agent integrations (Claude Code, Codex) as seen by the app.
+struct AgentLink {
+    watcher: agents::Watcher,
     /// Toasts on screen: (event, time shown).
-    toasts: Vec<(claude::Event, f64)>,
-    /// Latest known state per Claude session.
-    sessions: BTreeMap<String, claude::Kind>,
-    /// (hooks present, hooks point at this exe) - refreshed after install/uninstall.
-    installed: (bool, bool),
+    toasts: Vec<(agents::Event, f64)>,
+    /// Latest known state per agent session.
+    sessions: BTreeMap<String, (Agent, agents::Kind)>,
+    /// Per agent: (hooks present, hooks point at this exe) - refreshed after install/uninstall.
+    installed: BTreeMap<Agent, (bool, bool)>,
     autolaunch: bool,
-    /// Result of the last install/uninstall click.
-    note: Option<(String, bool)>,
+    /// Result of the last install/uninstall click, per agent.
+    note: BTreeMap<Agent, (String, bool)>,
 }
 
-impl ClaudeLink {
+impl AgentLink {
     fn new() -> Self {
         Self {
-            watcher: claude::Watcher::new(),
+            watcher: agents::Watcher::new(),
             toasts: Vec::new(),
             sessions: BTreeMap::new(),
-            installed: claude::installed(),
-            autolaunch: claude::autolaunch_enabled(),
-            note: None,
+            installed: Agent::ALL.into_iter().map(|a| (a, agents::installed(a))).collect(),
+            autolaunch: agents::autolaunch_enabled(),
+            note: BTreeMap::new(),
         }
     }
 
-    fn working(&self) -> usize {
-        self.sessions.values().filter(|k| **k == claude::Kind::Working).count()
+    fn working(&self, agent: Agent) -> usize {
+        self.sessions.values().filter(|s| **s == (agent, agents::Kind::Working)).count()
     }
 }
 
@@ -87,7 +88,7 @@ impl App {
             stats,
             confirm_reset: false,
             last_time: None,
-            claude: ClaudeLink::new(),
+            agents: AgentLink::new(),
             #[cfg(windows)]
             win_size: None,
             #[cfg(debug_assertions)]
@@ -171,7 +172,7 @@ impl App {
             chip(ui, "Favourite", fav, AMBER);
         });
         ui.add_space(6.0);
-        self.claude_card(ui);
+        self.agents_card(ui);
         ui.add_space(10.0);
 
         let gap = 16.0;
@@ -228,69 +229,93 @@ impl App {
         self.win_size = Some((size, special));
     }
 
-    /// Home-page panel to connect Pondercade to Claude Code.
-    fn claude_card(&mut self, ui: &mut egui::Ui) {
-        let c = &mut self.claude;
+    /// Home-page panel to connect Pondercade to Claude Code and Codex, one row per agent.
+    fn agents_card(&mut self, ui: &mut egui::Ui) {
+        let c = &mut self.agents;
         Frame::default().fill(PANEL).corner_radius(14.0).inner_margin(egui::Margin::symmetric(16, 12)).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                let (any, current) = c.installed;
-                let (title, sub) = match (any, current) {
-                    (false, _) => (
-                        "Get a heads-up from Claude Code",
-                        "Install hooks: Pondercade opens when Claude starts working and tells you when it's done or needs you.",
-                    ),
-                    (true, false) => ("Claude Code hooks point elsewhere", "They were installed from another copy of Pondercade. Reinstall to use this one."),
-                    (true, true) => match c.working() {
-                        0 => ("Connected to Claude Code", "You'll get a toast here when Claude is done or needs your input."),
-                        1 => ("Claude is pondering…", "Play away. You'll get a toast here when it's done or needs you."),
-                        _ => ("Several Claudes are pondering…", "Play away. You'll get a toast for each one."),
-                    },
-                };
-                // Buttons are laid out first (right-to-left) so the text can wrap in the space left.
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let result = if !current {
-                        ui.add(Pill::primary(if any { "Reinstall hooks" } else { "Install hooks" }, ACCENT))
-                            .on_hover_text("Adds Pondercade to the hooks in ~/.claude/settings.json. Your other settings are kept and a backup is made.")
-                            .clicked()
-                            .then(|| claude::install().map(|_| "Installed. Takes effect in Claude Code sessions started from now on."))
-                    } else {
-                        ui.add(Pill::new("Remove hooks")).clicked().then(|| claude::uninstall().map(|_| "Hooks removed."))
+            // Auto-open is one shared setting; show its toggle on the first connected row only.
+            let mut autolaunch_shown = false;
+            for (i, agent) in Agent::ALL.into_iter().enumerate() {
+                if i > 0 {
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                }
+                let (name, product) = (agent.name(), agent.product());
+                ui.horizontal(|ui| {
+                    let (any, current) = c.installed.get(&agent).copied().unwrap_or_default();
+                    let (title, sub) = match (any, current) {
+                        (false, _) => (
+                            format!("Get a heads-up from {product}"),
+                            format!("Install hooks: Pondercade opens when {name} starts working and tells you when it's done or needs you."),
+                        ),
+                        (true, false) => (
+                            format!("{product} hooks point elsewhere"),
+                            "They were installed from another copy of Pondercade. Reinstall to use this one.".to_owned(),
+                        ),
+                        (true, true) => match c.working(agent) {
+                            0 => (format!("Connected to {product}"), format!("You'll get a toast here when {name} is done or needs your input.")),
+                            1 => (format!("{name} is pondering…"), "Play away. You'll get a toast here when it's done or needs you.".to_owned()),
+                            _ => (format!("Several {name}s are pondering…"), "Play away. You'll get a toast for each one.".to_owned()),
+                        },
                     };
-                    if let Some(r) = result {
-                        c.note = Some(match r {
-                            Ok(m) => (m.to_owned(), true),
-                            Err(e) => (e, false),
+                    // Buttons are laid out first (right-to-left) so the text can wrap in the space left.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let result = if !current {
+                            let done_msg = match agent {
+                                Agent::Claude => "Installed. Takes effect in Claude Code sessions started from now on.",
+                                // Codex skips new hooks until the user trusts them.
+                                Agent::Codex => "Installed. Now run /hooks in Codex and trust the Pondercade hooks.",
+                            };
+                            let hover = format!(
+                                "Adds Pondercade to the hooks in {}. Your other settings are kept and a backup is made.",
+                                agent.config_display()
+                            );
+                            ui.add(Pill::primary(if any { "Reinstall hooks" } else { "Install hooks" }, ACCENT))
+                                .on_hover_text(hover)
+                                .clicked()
+                                .then(|| agents::install(agent).map(|_| done_msg))
+                        } else {
+                            ui.add(Pill::new("Remove hooks")).clicked().then(|| agents::uninstall(agent).map(|_| "Hooks removed."))
+                        };
+                        if let Some(r) = result {
+                            let note = match r {
+                                Ok(m) => (m.to_owned(), true),
+                                Err(e) => (e, false),
+                            };
+                            c.note.insert(agent, note);
+                            c.installed.insert(agent, agents::installed(agent));
+                        }
+                        if current && !autolaunch_shown {
+                            autolaunch_shown = true;
+                            let label = if c.autolaunch { "Auto-open: on" } else { "Auto-open: off" };
+                            if ui.add(Pill::new(label).selected(c.autolaunch)).on_hover_text("Open Pondercade automatically when your agent starts working").clicked() {
+                                c.autolaunch = !c.autolaunch;
+                                agents::set_autolaunch(c.autolaunch);
+                            }
+                        }
+                        ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            ui.label(RichText::new(title).size(15.0).strong().color(TEXT));
+                            ui.label(RichText::new(sub).size(12.5).color(MUTED));
+                            if let Some((msg, ok)) = c.note.get(&agent) {
+                                ui.label(RichText::new(msg).size(12.0).color(if *ok { GREEN } else { RED }));
+                            }
                         });
-                        c.installed = claude::installed();
-                    }
-                    if current {
-                        let label = if c.autolaunch { "Auto-open: on" } else { "Auto-open: off" };
-                        if ui.add(Pill::new(label).selected(c.autolaunch)).on_hover_text("Open Pondercade automatically when Claude starts working").clicked() {
-                            c.autolaunch = !c.autolaunch;
-                            claude::set_autolaunch(c.autolaunch);
-                        }
-                    }
-                    ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
-                        ui.spacing_mut().item_spacing.y = 2.0;
-                        ui.label(RichText::new(title).size(15.0).strong().color(TEXT));
-                        ui.label(RichText::new(sub).size(12.5).color(MUTED));
-                        if let Some((msg, ok)) = &c.note {
-                            ui.label(RichText::new(msg).size(12.0).color(if *ok { GREEN } else { RED }));
-                        }
                     });
                 });
-            });
+            }
         });
     }
 
-    /// Polls for Claude Code events and draws toasts in the top-right corner.
-    fn claude_toasts(&mut self, ctx: &egui::Context) {
-        use claude::Kind;
+    /// Polls for agent events and draws toasts in the top-right corner.
+    fn agent_toasts(&mut self, ctx: &egui::Context) {
+        use agents::Kind;
         let now = ctx.input(|i| i.time);
-        let c = &mut self.claude;
+        let c = &mut self.agents;
         for e in c.watcher.poll(now) {
-            c.sessions.insert(e.session.clone(), e.kind);
+            c.sessions.insert(e.session.clone(), (e.agent, e.kind));
             // Newer news about a session replaces its older toast.
             c.toasts.retain(|(t, _)| t.session != e.session || e.session.is_empty());
             if e.kind != Kind::Working && !ctx.input(|i| i.focused) {
@@ -316,10 +341,11 @@ impl App {
             if k < 1.0 {
                 ctx.request_repaint();
             }
+            let name = e.agent.name();
             let (title, color) = match e.kind {
-                Kind::Working => ("Claude is pondering…", ACCENT),
-                Kind::Done => ("Claude is done", GREEN),
-                Kind::Input => ("Claude needs your input", AMBER),
+                Kind::Working => (format!("{name} is pondering…"), ACCENT),
+                Kind::Done => (format!("{name} is done"), GREEN),
+                Kind::Input => (format!("{name} needs your input"), AMBER),
             };
             let detail = match e.kind {
                 Kind::Working => "Play away, you'll get a heads-up.".to_owned(),
@@ -327,7 +353,7 @@ impl App {
                 Kind::Input if !e.message.is_empty() => e.message.clone(),
                 Kind::Input => "It's waiting for you.".to_owned(),
             };
-            let resp = egui::Area::new(egui::Id::unique(("claude_toast", i)))
+            let resp = egui::Area::new(egui::Id::unique(("agent_toast", i)))
                 .order(egui::Order::Foreground)
                 .movable(false)
                 .sense(Sense::click())
@@ -561,11 +587,11 @@ impl eframe::App for App {
             }
         });
         let ctx = ui.ctx().clone();
-        self.claude_toasts(&ctx);
+        self.agent_toasts(&ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        claude::app_closed();
+        agents::app_closed();
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -631,14 +657,25 @@ fn initial_size() -> [f32; 2] {
 }
 
 fn main() -> eframe::Result {
-    // `pondercade hook` is run by Claude Code's hooks: record the event and exit without a window.
-    match std::env::args().nth(1).as_deref() {
+    // `pondercade hook [codex]` is run by Claude Code's / Codex's hooks: record the event and
+    // exit without a window.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let agent_arg = || Agent::from_arg(args.get(1).map(String::as_str));
+    match args.first().map(String::as_str) {
         Some("hook") => {
-            claude::run_hook();
+            if let Some(agent) = agent_arg() {
+                agents::run_hook(agent);
+            }
             return Ok(());
         }
-        Some("install-hooks") => std::process::exit(i32::from(claude::install().is_err())),
-        Some("uninstall-hooks") => std::process::exit(i32::from(claude::uninstall().is_err())),
+        Some(cmd @ ("install-hooks" | "uninstall-hooks")) => {
+            let Some(agent) = agent_arg() else { std::process::exit(2) };
+            let r = if cmd == "install-hooks" { agents::install(agent) } else { agents::uninstall(agent) };
+            if let Err(e) = &r {
+                eprintln!("{e}");
+            }
+            std::process::exit(i32::from(r.is_err()));
+        }
         _ => {}
     }
     #[allow(unused_mut)]
