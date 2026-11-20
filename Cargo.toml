@@ -1,6 +1,6 @@
 [package]
 name = "pondercade"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Pondercade - a tiny arcade of polished mini games for while your AI is pondering"
 license = "MIT"
